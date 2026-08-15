@@ -197,7 +197,8 @@ jobs:
           git checkout -B "$BRANCH"
           git add -A
           git reset HEAD -- paperclip-task.txt openhands-events.jsonl 2>/dev/null || true
-          if [ -z "$(git status --porcelain)" ]; then
+          # Untracked transient files still show in porcelain; only commit if something is staged
+          if [ -z "$(git diff --cached --name-only)" ]; then
             echo "Only transient files changed; nothing to push"
             exit 0
           fi

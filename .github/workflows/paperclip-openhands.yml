@@ -1,0 +1,244 @@
+# Public runner for Paperclip → OpenHands.
+# Workflow is public; secrets stay in Actions settings.
+# The job clones private wilgott/klinky.io, works there, and can push a branch/PR.
+
+name: Paperclip OpenHands
+
+run-name: "Paperclip OpenHands ${{ inputs.run_marker }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: Task prompt from Paperclip
+        required: true
+        type: string
+      run_marker:
+        description: Unique marker paperclip-run-<uuid>
+        required: true
+        type: string
+      target_repo:
+        description: Private repo to clone and push to (owner/name)
+        required: false
+        default: "wilgott/klinky.io"
+        type: string
+      target_ref:
+        description: Branch to start from
+        required: false
+        default: "main"
+        type: string
+      paperclip_api_url:
+        description: Paperclip base URL (Tailscale IP)
+        required: false
+        default: "http://100.118.240.21:3100"
+        type: string
+      paperclip_api_key:
+        required: false
+        default: ""
+        type: string
+      paperclip_run_id:
+        required: false
+        default: ""
+        type: string
+      paperclip_issue_id:
+        required: false
+        default: ""
+        type: string
+      paperclip_agent_id:
+        required: false
+        default: ""
+        type: string
+      paperclip_company_id:
+        required: false
+        default: ""
+        type: string
+      paperclip_agent_name:
+        required: false
+        default: "Dev"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: paperclip-openhands-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  openhands:
+    name: OpenHands on ubuntu-latest (+ Tailscale → private repo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout runner repo (workflow only)
+        uses: actions/checkout@v4
+
+      - name: Connect Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          hostname: gha-paperclip-oh-${{ github.run_id }}
+
+      - name: Checkout private target repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.target_repo }}
+          ref: ${{ inputs.target_ref }}
+          token: ${{ secrets.KLINKY_REPO_TOKEN }}
+          path: workspace
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install OpenHands CLI
+        run: uv tool install openhands --python 3.12
+
+      - name: Write task prompt
+        working-directory: workspace
+        env:
+          PROMPT: ${{ inputs.prompt }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib
+          pathlib.Path("paperclip-task.txt").write_text(os.environ["PROMPT"], encoding="utf-8")
+          print(f"Wrote paperclip-task.txt ({len(os.environ['PROMPT'])} chars)")
+          PY
+
+      - name: Configure git identity
+        working-directory: workspace
+        run: |
+          git config user.name "paperclip-openhands[bot]"
+          git config user.email "paperclip-openhands[bot]@users.noreply.github.com"
+
+      - name: Run OpenHands headless
+        working-directory: workspace
+        env:
+          LLM_API_KEY: ${{ secrets.OMNIROUTE_API_KEY }}
+          LLM_MODEL: ${{ vars.PAPERCLIP_OH_LLM_MODEL || 'openai/my-combo' }}
+          LLM_BASE_URL: ${{ vars.PAPERCLIP_OH_LLM_BASE_URL || 'http://100.86.141.107:20128/v1' }}
+          RUNTIME: local
+          AGENT_ENABLE_PROMPT_EXTENSIONS: "false"
+          OPENHANDS_SUPPRESS_BANNER: "1"
+          TTY_COMPATIBLE: "1"
+          PAPERCLIP_API_URL: ${{ inputs.paperclip_api_url }}
+          PAPERCLIP_API_KEY: ${{ inputs.paperclip_api_key }}
+          PAPERCLIP_RUN_ID: ${{ inputs.paperclip_run_id }}
+          PAPERCLIP_ISSUE_ID: ${{ inputs.paperclip_issue_id }}
+          PAPERCLIP_AGENT_ID: ${{ inputs.paperclip_agent_id }}
+          PAPERCLIP_COMPANY_ID: ${{ inputs.paperclip_company_id }}
+          PAPERCLIP_AGENT_NAME: ${{ inputs.paperclip_agent_name }}
+          GH_TOKEN: ${{ secrets.KLINKY_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${LLM_API_KEY:-}" ]; then
+            echo "OMNIROUTE_API_KEY secret is missing" >&2
+            exit 1
+          fi
+          echo "LLM_MODEL=$LLM_MODEL"
+          echo "LLM_BASE_URL=$LLM_BASE_URL"
+          echo "target=${{ inputs.target_repo }}@${{ inputs.target_ref }}"
+          echo "cwd=$(pwd)"
+          code=$(curl -sS -o /tmp/llm-models.json -w "%{http_code}" -m 20 \
+            -H "Authorization: Bearer ${LLM_API_KEY}" \
+            "${LLM_BASE_URL%/}/models" || true)
+          echo "LLM /models HTTP $code"
+          if [ "$code" != "200" ]; then
+            echo "LLM endpoint probe failed (Tailscale + OmniRoute?)" >&2
+            head -c 400 /tmp/llm-models.json || true
+            echo
+            exit 1
+          fi
+          openhands --headless --json --override-with-envs --exit-without-confirmation \
+            -f paperclip-task.txt | tee openhands-events.jsonl
+          test -s openhands-events.jsonl || {
+            echo "openhands produced no event output" >&2
+            exit 1
+          }
+          if command -v rg >/dev/null 2>&1; then
+            if rg -q '"code": "AuthenticationError"' openhands-events.jsonl; then
+              echo "OpenHands AuthenticationError — see artifact" >&2
+              exit 1
+            fi
+          fi
+
+      - name: Upload OpenHands event log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openhands-events-${{ inputs.run_marker }}
+          path: workspace/openhands-events.jsonl
+          if-no-files-found: ignore
+
+      - name: Push branch if OpenHands changed files
+        if: success()
+        working-directory: workspace
+        env:
+          GH_TOKEN: ${{ secrets.KLINKY_REPO_TOKEN }}
+          RUN_MARKER: ${{ inputs.run_marker }}
+          TARGET_REPO: ${{ inputs.target_repo }}
+        run: |
+          set -euo pipefail
+          # Drop the prompt file from the commit unless the agent intentionally kept it
+          git status --porcelain
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No file changes to push"
+            exit 0
+          fi
+          BRANCH="paperclip/oh-${RUN_MARKER}"
+          # sanitize branch name
+          BRANCH=$(echo "$BRANCH" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._/-]/-/g' | cut -c1-200)
+          git checkout -B "$BRANCH"
+          git add -A
+          git reset HEAD -- paperclip-task.txt openhands-events.jsonl 2>/dev/null || true
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "Only transient files changed; nothing to push"
+            exit 0
+          fi
+          git commit -m "paperclip: OpenHands changes (${RUN_MARKER})"
+          git push -u "https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPO}.git" "HEAD:${BRANCH}"
+          gh pr create --repo "$TARGET_REPO" \
+            --title "Paperclip OpenHands: ${RUN_MARKER}" \
+            --body "Automated OpenHands run from public runner \`paperclip-openhands-runner\`.\n\nMarker: \`${RUN_MARKER}\`\nActions: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --base "${{ inputs.target_ref }}" \
+            --head "$BRANCH" || echo "PR create skipped (may already exist)"
+
+      - name: Summarize for Paperclip (optional HTTP comment)
+        if: always() && inputs.paperclip_api_url != '' && inputs.paperclip_api_key != '' && inputs.paperclip_issue_id != ''
+        env:
+          PAPERCLIP_API_URL: ${{ inputs.paperclip_api_url }}
+          PAPERCLIP_API_KEY: ${{ inputs.paperclip_api_key }}
+          PAPERCLIP_ISSUE_ID: ${{ inputs.paperclip_issue_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+          body = {
+            "body": (
+              f"OpenHands GitHub Actions run finished (public runner → private repo).\n\n"
+              f"- Actions: {os.environ['RUN_URL']}\n"
+            )
+          }
+          url = os.environ["PAPERCLIP_API_URL"].rstrip("/") + f"/api/issues/{os.environ['PAPERCLIP_ISSUE_ID']}/comments"
+          req = urllib.request.Request(
+              url,
+              data=json.dumps(body).encode(),
+              headers={
+                  "Authorization": f"Bearer {os.environ['PAPERCLIP_API_KEY']}",
+                  "Content-Type": "application/json",
+                  "Accept": "application/json",
+              },
+              method="POST",
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  print("Paperclip comment status", resp.status)
+          except Exception as e:
+              print("Paperclip comment skipped/failed:", e)
+          PY

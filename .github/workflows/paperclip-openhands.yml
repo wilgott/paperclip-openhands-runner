@@ -140,6 +140,7 @@ jobs:
           PAPERCLIP_COMPANY_ID: ${{ inputs.paperclip_company_id }}
           PAPERCLIP_AGENT_NAME: ${{ inputs.paperclip_agent_name }}
           GH_TOKEN: ${{ secrets.KLINKY_REPO_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.KLINKY_REPO_TOKEN }}
         run: |
           set -euo pipefail
           if [ -z "${LLM_API_KEY:-}" ]; then
@@ -149,6 +150,7 @@ jobs:
           echo "LLM_MODEL=$LLM_MODEL"
           echo "LLM_BASE_URL=$LLM_BASE_URL"
           echo "target=${{ inputs.target_repo }}@${{ inputs.target_ref }}"
+          echo "agent=${PAPERCLIP_AGENT_NAME:-unknown}"
           echo "cwd=$(pwd)"
           code=$(curl -sS -o /tmp/llm-models.json -w "%{http_code}" -m 20 \
             -H "Authorization: Bearer ${LLM_API_KEY}" \
@@ -160,6 +162,9 @@ jobs:
             echo
             exit 1
           fi
+          # OpenHands github skill expects GITHUB_TOKEN
+          export GITHUB_TOKEN="${GITHUB_TOKEN:-$GH_TOKEN}"
+          export GH_TOKEN="${GH_TOKEN:-$GITHUB_TOKEN}"
           openhands --headless --json --override-with-envs --exit-without-confirmation \
             -f paperclip-task.txt | tee openhands-events.jsonl
           test -s openhands-events.jsonl || {

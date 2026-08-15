@@ -100,6 +100,11 @@ jobs:
       - name: Install OpenHands CLI
         run: uv tool install openhands --python 3.12
 
+      - name: Install image tooling for asset tasks
+        run: |
+          python3 -m pip install --user pillow
+          python3 -c "from PIL import Image, ImageDraw, ImageFont; print('pillow-ok')"
+
       - name: Write task prompt
         working-directory: workspace
         env:

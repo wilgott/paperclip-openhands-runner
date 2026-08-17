@@ -261,13 +261,14 @@ jobs:
           fi
           git commit -m "paperclip: OpenHands changes (${RUN_MARKER})"
           git push -u "https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPO}.git" "HEAD:${BRANCH}"
+          PR_BODY="Automated OpenHands run from public runner paperclip-openhands-runner.
+
+          Marker: ${RUN_MARKER}
+          Actions: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           PR_URL=""
           if gh pr create --repo "$TARGET_REPO" \
             --title "Paperclip OpenHands: ${RUN_MARKER}" \
-            --body "Automated OpenHands run from public runner \`paperclip-openhands-runner\`.
-
-Marker: \`${RUN_MARKER}\`
-Actions: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --body "$PR_BODY" \
             --base "${{ inputs.target_ref }}" \
             --head "$BRANCH"; then
             PR_URL=$(gh pr view --repo "$TARGET_REPO" --head "$BRANCH" --json url -q .url || true)

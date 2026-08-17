@@ -80,6 +80,51 @@ jobs:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
           hostname: gha-paperclip-oh-${{ github.run_id }}
 
+      - name: Notify Paperclip — starting
+        if: inputs.paperclip_api_url != '' && inputs.paperclip_api_key != '' && inputs.paperclip_issue_id != ''
+        continue-on-error: true
+        env:
+          PAPERCLIP_API_URL: ${{ inputs.paperclip_api_url }}
+          PAPERCLIP_API_KEY: ${{ inputs.paperclip_api_key }}
+          PAPERCLIP_ISSUE_ID: ${{ inputs.paperclip_issue_id }}
+          PAPERCLIP_RUN_ID: ${{ inputs.paperclip_run_id }}
+          PAPERCLIP_AGENT_NAME: ${{ inputs.paperclip_agent_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TARGET_REPO: ${{ inputs.target_repo }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.error, urllib.request
+          agent = os.environ.get("PAPERCLIP_AGENT_NAME") or "Agent"
+          repo = os.environ.get("TARGET_REPO") or "the repo"
+          body = (
+              f"## Plan\n\n"
+              f"{agent} is on the GitHub runner and will execute this issue with OpenHands.\n\n"
+              f"I will:\n"
+              f"- Read the issue and `{repo}`\n"
+              f"- Implement the requested work in this run\n"
+              f"- Push a PR if files change\n"
+              f"- Comment again when finished\n\n"
+              f"Links:\n"
+              f"- Actions: {os.environ['RUN_URL']}\n"
+          )
+          url = os.environ["PAPERCLIP_API_URL"].rstrip("/") + f"/api/issues/{os.environ['PAPERCLIP_ISSUE_ID']}/comments"
+          headers = {
+              "Authorization": f"Bearer {os.environ['PAPERCLIP_API_KEY']}",
+              "Content-Type": "application/json",
+              "Accept": "application/json",
+          }
+          run_id = os.environ.get("PAPERCLIP_RUN_ID", "").strip()
+          if run_id:
+              headers["X-Paperclip-Run-Id"] = run_id
+          req = urllib.request.Request(url, data=json.dumps({"body": body}).encode(), headers=headers, method="POST")
+          try:
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  print("Paperclip starting comment status", resp.status)
+          except urllib.error.HTTPError as exc:
+              print("Paperclip starting comment failed:", exc.code, exc.read()[:400], file=__import__("sys").stderr)
+              raise
+          PY
+
       - name: Checkout private target repo
         uses: actions/checkout@v4
         with:
@@ -136,6 +181,7 @@ jobs:
           PAPERCLIP_API_KEY: ${{ inputs.paperclip_api_key }}
           PAPERCLIP_RUN_ID: ${{ inputs.paperclip_run_id }}
           PAPERCLIP_ISSUE_ID: ${{ inputs.paperclip_issue_id }}
+          PAPERCLIP_TASK_ID: ${{ inputs.paperclip_issue_id }}
           PAPERCLIP_AGENT_ID: ${{ inputs.paperclip_agent_id }}
           PAPERCLIP_COMPANY_ID: ${{ inputs.paperclip_company_id }}
           PAPERCLIP_AGENT_NAME: ${{ inputs.paperclip_agent_name }}
@@ -151,6 +197,7 @@ jobs:
           echo "LLM_BASE_URL=$LLM_BASE_URL"
           echo "target=${{ inputs.target_repo }}@${{ inputs.target_ref }}"
           echo "agent=${PAPERCLIP_AGENT_NAME:-unknown}"
+          echo "paperclip_issue_id_set=$([ -n "${PAPERCLIP_ISSUE_ID:-}" ] && echo yes || echo no)"
           echo "cwd=$(pwd)"
           code=$(curl -sS -o /tmp/llm-models.json -w "%{http_code}" -m 20 \
             -H "Authorization: Bearer ${LLM_API_KEY}" \
@@ -214,42 +261,98 @@ jobs:
           fi
           git commit -m "paperclip: OpenHands changes (${RUN_MARKER})"
           git push -u "https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPO}.git" "HEAD:${BRANCH}"
-          gh pr create --repo "$TARGET_REPO" \
+          PR_URL=""
+          if gh pr create --repo "$TARGET_REPO" \
             --title "Paperclip OpenHands: ${RUN_MARKER}" \
-            --body "Automated OpenHands run from public runner \`paperclip-openhands-runner\`.\n\nMarker: \`${RUN_MARKER}\`\nActions: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            --base "${{ inputs.target_ref }}" \
-            --head "$BRANCH" || echo "PR create skipped (may already exist)"
+            --body "Automated OpenHands run from public runner \`paperclip-openhands-runner\`.
 
-      - name: Summarize for Paperclip (optional HTTP comment)
+Marker: \`${RUN_MARKER}\`
+Actions: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --base "${{ inputs.target_ref }}" \
+            --head "$BRANCH"; then
+            PR_URL=$(gh pr view --repo "$TARGET_REPO" --head "$BRANCH" --json url -q .url || true)
+          else
+            echo "PR create skipped (may already exist)"
+            PR_URL=$(gh pr view --repo "$TARGET_REPO" --head "$BRANCH" --json url -q .url || true)
+          fi
+          printf '%s\n' "$PR_URL" > paperclip-pr-url.txt
+          echo "PR_URL=${PR_URL:-none}"
+
+      - name: Summarize for Paperclip
         if: always() && inputs.paperclip_api_url != '' && inputs.paperclip_api_key != '' && inputs.paperclip_issue_id != ''
+        continue-on-error: true
         env:
           PAPERCLIP_API_URL: ${{ inputs.paperclip_api_url }}
           PAPERCLIP_API_KEY: ${{ inputs.paperclip_api_key }}
           PAPERCLIP_ISSUE_ID: ${{ inputs.paperclip_issue_id }}
+          PAPERCLIP_RUN_ID: ${{ inputs.paperclip_run_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          JOB_CONCLUSION: ${{ job.status }}
         run: |
           python3 - <<'PY'
-          import json, os, urllib.request
-          body = {
-            "body": (
-              f"OpenHands GitHub Actions run finished (public runner → private repo).\n\n"
-              f"- Actions: {os.environ['RUN_URL']}\n"
-            )
-          }
+          import json, os, pathlib, urllib.error, urllib.request
+
+          def extract_summary(path):
+              last = ""
+              try:
+                  for raw in pathlib.Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
+                      raw = raw.strip()
+                      if not raw:
+                          continue
+                      try:
+                          ev = json.loads(raw)
+                      except json.JSONDecodeError:
+                          continue
+                      if not isinstance(ev, dict):
+                          continue
+                      for key in ("message", "content", "text"):
+                          val = ev.get(key)
+                          if isinstance(val, str) and len(val.strip()) > 40:
+                              last = val.strip()
+                          elif isinstance(val, list):
+                              texts = [p.get("text", "") for p in val if isinstance(p, dict) and p.get("text")]
+                              joined = "\n".join(texts).strip()
+                              if len(joined) > 40:
+                                  last = joined
+                      args = ev.get("args") if isinstance(ev.get("args"), dict) else {}
+                      if isinstance(args.get("content"), str) and len(args["content"].strip()) > 40:
+                          last = args["content"].strip()
+              except FileNotFoundError:
+                  return ""
+              return last[:2000]
+
+          pr = ""
+          pr_path = pathlib.Path("workspace/paperclip-pr-url.txt")
+          if pr_path.exists():
+              pr = pr_path.read_text(encoding="utf-8").strip()
+          summary = extract_summary("workspace/openhands-events.jsonl")
+          lines = [
+              "## Update",
+              "",
+              f"OpenHands GitHub Actions run **{os.environ.get('JOB_CONCLUSION', 'finished')}**.",
+              "",
+          ]
+          if summary:
+              lines.extend([summary, ""])
+          lines.append("Links:")
+          lines.append(f"- Actions: {os.environ['RUN_URL']}")
+          if pr:
+              lines.append(f"- PR: {pr}")
+          body = "\n".join(lines) + "\n"
           url = os.environ["PAPERCLIP_API_URL"].rstrip("/") + f"/api/issues/{os.environ['PAPERCLIP_ISSUE_ID']}/comments"
-          req = urllib.request.Request(
-              url,
-              data=json.dumps(body).encode(),
-              headers={
-                  "Authorization": f"Bearer {os.environ['PAPERCLIP_API_KEY']}",
-                  "Content-Type": "application/json",
-                  "Accept": "application/json",
-              },
-              method="POST",
-          )
+          headers = {
+              "Authorization": f"Bearer {os.environ['PAPERCLIP_API_KEY']}",
+              "Content-Type": "application/json",
+              "Accept": "application/json",
+          }
+          run_id = os.environ.get("PAPERCLIP_RUN_ID", "").strip()
+          if run_id:
+              headers["X-Paperclip-Run-Id"] = run_id
+          req = urllib.request.Request(url, data=json.dumps({"body": body}).encode(), headers=headers, method="POST")
           try:
               with urllib.request.urlopen(req, timeout=30) as resp:
-                  print("Paperclip comment status", resp.status)
-          except Exception as e:
-              print("Paperclip comment skipped/failed:", e)
+                  print("Paperclip finish comment status", resp.status)
+          except urllib.error.HTTPError as exc:
+              print("Paperclip finish comment failed:", exc.code, exc.read()[:400], file=__import__("sys").stderr)
+              raise
           PY

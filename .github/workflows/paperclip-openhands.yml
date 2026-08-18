@@ -100,9 +100,9 @@ jobs:
               f"## Plan\n\n"
               f"{agent} is on the GitHub runner and will execute this issue with OpenHands.\n\n"
               f"I will:\n"
-              f"- Read the issue and `{repo}`\n"
+              f"- Read the issue and GitHub repo `{repo}` (Paperclip is tickets only)\n"
               f"- Implement the requested work in this run\n"
-              f"- Push a PR if files change\n"
+              f"- Push or update a PR on GitHub if files change\n"
               f"- Comment again when finished\n\n"
               f"Links:\n"
               f"- Actions: {os.environ['RUN_URL']}\n"
@@ -133,6 +133,30 @@ jobs:
           token: ${{ secrets.KLINKY_REPO_TOKEN }}
           path: workspace
           fetch-depth: 0
+
+      - name: Continue existing Paperclip PR branch when possible
+        working-directory: workspace
+        env:
+          GH_TOKEN: ${{ secrets.KLINKY_REPO_TOKEN }}
+          TARGET_REPO: ${{ inputs.target_repo }}
+          ISSUE_ID: ${{ inputs.paperclip_issue_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "$ISSUE_ID" ]; then
+            echo "No Paperclip issue id; staying on ${{ inputs.target_ref }}"
+            exit 0
+          fi
+          BRANCH=$(gh pr list --repo "$TARGET_REPO" --state open --limit 50 \
+            --json headRefName,body,updatedAt \
+            --jq "[.[] | select((.body // \"\") | contains(\"$ISSUE_ID\"))] | sort_by(.updatedAt) | reverse | .[0].headRefName // empty" \
+            || true)
+          if [ -z "$BRANCH" ]; then
+            echo "No open PR mentions this issue; staying on current ref"
+            exit 0
+          fi
+          echo "Checking out existing PR branch $BRANCH"
+          git fetch origin "$BRANCH"
+          git checkout "$BRANCH"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -244,8 +268,29 @@ jobs:
           set -euo pipefail
           # Drop the prompt file from the commit unless the agent intentionally kept it
           git status --porcelain
+          ISSUE_ID="${{ inputs.paperclip_issue_id }}"
+          link_existing_pr() {
+            local found=""
+            if [ -n "$ISSUE_ID" ]; then
+              found=$(gh pr list --repo "$TARGET_REPO" --state open --limit 50 \
+                --json url,body,title,headRefName,updatedAt \
+                --jq "[.[] | select((.body // \"\") | contains(\"$ISSUE_ID\"))] | sort_by(.updatedAt) | reverse | .[0].url // empty" \
+                || true)
+            fi
+            if [ -z "$found" ]; then
+              found=$(gh pr list --repo "$TARGET_REPO" --state open --limit 20 \
+                --json url,headRefName,updatedAt \
+                --jq '[.[] | select(.headRefName | startswith("paperclip/oh-"))] | sort_by(.updatedAt) | reverse | .[0].url // empty' \
+                || true)
+            fi
+            if [ -n "$found" ]; then
+              printf '%s\n' "$found" > paperclip-pr-url.txt
+              echo "Linking existing PR ${found}"
+            fi
+          }
           if [ -z "$(git status --porcelain)" ]; then
             echo "No file changes to push"
+            link_existing_pr
             exit 0
           fi
           BRANCH="paperclip/oh-${RUN_MARKER}"
@@ -257,6 +302,7 @@ jobs:
           # Untracked transient files still show in porcelain; only commit if something is staged
           if [ -z "$(git diff --cached --name-only)" ]; then
             echo "Only transient files changed; nothing to push"
+            link_existing_pr
             exit 0
           fi
           git commit -m "paperclip: OpenHands changes (${RUN_MARKER})"
@@ -264,6 +310,7 @@ jobs:
           PR_BODY="Automated OpenHands run from public runner paperclip-openhands-runner.
 
           Marker: ${RUN_MARKER}
+          Paperclip issue: ${ISSUE_ID}
           Actions: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           PR_URL=""
           if gh pr create --repo "$TARGET_REPO" \

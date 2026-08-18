@@ -271,21 +271,19 @@ jobs:
           ISSUE_ID="${{ inputs.paperclip_issue_id }}"
           link_existing_pr() {
             local found=""
-            if [ -n "$ISSUE_ID" ]; then
-              found=$(gh pr list --repo "$TARGET_REPO" --state open --limit 50 \
-                --json url,body,title,headRefName,updatedAt \
-                --jq "[.[] | select((.body // \"\") | contains(\"$ISSUE_ID\"))] | sort_by(.updatedAt) | reverse | .[0].url // empty" \
-                || true)
+            if [ -z "$ISSUE_ID" ]; then
+              echo "No Paperclip issue id; cannot attach an existing PR"
+              return 0
             fi
-            if [ -z "$found" ]; then
-              found=$(gh pr list --repo "$TARGET_REPO" --state open --limit 20 \
-                --json url,headRefName,updatedAt \
-                --jq '[.[] | select(.headRefName | startswith("paperclip/oh-"))] | sort_by(.updatedAt) | reverse | .[0].url // empty' \
-                || true)
-            fi
+            found=$(gh pr list --repo "$TARGET_REPO" --state open --limit 50 \
+              --json url,body,updatedAt \
+              --jq "[.[] | select((.body // \"\") | contains(\"$ISSUE_ID\"))] | sort_by(.updatedAt) | reverse | .[0].url // empty" \
+              || true)
             if [ -n "$found" ]; then
               printf '%s\n' "$found" > paperclip-pr-url.txt
               echo "Linking existing PR ${found}"
+            else
+              echo "No open PR body mentions this Paperclip issue"
             fi
           }
           if [ -z "$(git status --porcelain)" ]; then

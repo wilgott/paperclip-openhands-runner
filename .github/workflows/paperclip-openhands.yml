@@ -195,7 +195,7 @@ jobs:
         working-directory: workspace
         env:
           LLM_API_KEY: ${{ secrets.OMNIROUTE_API_KEY }}
-          LLM_MODEL: ${{ vars.PAPERCLIP_OH_LLM_MODEL || 'openai/my-combo' }}
+          LLM_MODEL: ${{ vars.PAPERCLIP_OH_LLM_MODEL || 'openai/commandcode-combo' }}
           LLM_BASE_URL: ${{ vars.PAPERCLIP_OH_LLM_BASE_URL || 'http://100.86.141.107:20128/v1' }}
           RUNTIME: local
           AGENT_ENABLE_PROMPT_EXTENSIONS: "false"
@@ -236,7 +236,7 @@ jobs:
           # OpenHands github skill expects GITHUB_TOKEN
           export GITHUB_TOKEN="${GITHUB_TOKEN:-$GH_TOKEN}"
           export GH_TOKEN="${GH_TOKEN:-$GITHUB_TOKEN}"
-          openhands --headless --json --override-with-envs --exit-without-confirmation \
+          openhands --headless --json --streaming --override-with-envs --exit-without-confirmation \
             -f paperclip-task.txt | tee openhands-events.jsonl
           test -s openhands-events.jsonl || {
             echo "openhands produced no event output" >&2
